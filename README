@@ -1,0 +1,48 @@
+Packet filter using tun device for linux(ubuntu)
+
+
+Program is written in c (gcc)
+
+dependencies:
+-- libcidr, a library to handle manipulating CIDR netblocks in IPv4 and IPv6 in a host of ways.
+apt install libcidr-dev
+
+
+
+to compile:
+ 
+  gcc -o tunfilter main.c -lcidr
+  
+to execute program:
+
+./tunfilter -i tun1 -d
+
+
+
+Usage:
+./tunfilter -i <ifacename>  [-d]
+./tunfilter -h
+
+-i <ifacename>: Name of interface to use (mandatory)
+-d: outputs debug information while running
+-h: prints this help text
+
+
+
+
+
+Interface setup:
+
+openvpn --mktun --dev tun1
+ip link set tun1 up
+ifconfig tun1 192.168.5.1 pointopoint 192.168.5.2 mtu 1500
+
+
+
+
+test:
+TCP test
+curl --interface tun1 https://172.217.16.131
+
+QUIC test
+curl --interface tun1 --HTTP3 https://172.217.16.131
