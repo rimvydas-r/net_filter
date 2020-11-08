@@ -4,7 +4,6 @@
 
 TODO:
 
-*make arrays dynamic to save memory
 *implement quic connection recognition https://github.com/wireshark/wireshark/blob/master/epan/dissectors/packet-quic.c as currently it  limits all udp traffic
 *track conection end and cleanup connection table
 *implement port checking to allow multiple connections at the same time to  the same host
@@ -35,15 +34,12 @@ TODO:
 #include <time.h>
 #include <netdb.h>	
 
-
 #define BUFSIZE 2000   
-#define MAX_RULES 20
-#define MAX_CONN 100
 
 int debug;
 char *progname;
 
-struct rule
+typedef struct 
 {
   char address[255];	
   uint32_t netstart;
@@ -51,21 +47,21 @@ struct rule
   int type;
   uint32_t amount;
   int time;	
-};
+} rule;
 
-struct rule arr_rules[MAX_RULES];
+rule *arr_rules=NULL;
 int rules_cnt = 0;
 
-struct conn_data
+typedef struct 
 {
   uint32_t adest;
   int port;
   int rule;
   uint32_t amount;
   uint32_t starttime;
-};
+} conn_data;
 
-struct conn_data arr_conn[MAX_CONN];  
+conn_data *arr_conn=NULL;  
 int conn_cnt;
 
 /**************************************************************************
@@ -423,6 +419,8 @@ static int InspectPacket(u_char* buf, ssize_t n, u_char* net1, u_char* net2) {
       }
       if (conn_found==0)//add connection  to list
       {
+      
+        arr_conn=(conn_data*)realloc(arr_conn, (conn_cnt+1)*sizeof(conn_data));
         arr_conn[conn_cnt].adest=ip_tocheck;
         if ( arr_rules[i].type==1)
         {
@@ -549,8 +547,14 @@ int main(int argc, char *argv[]) {
   frules = fopen("rules", "r");
   if (frules == NULL)
     do_debug("can't open rules file", "");
+  
+  arr_rules = NULL;
+    
   while ((read = getline(&line, &len, frules)) != -1) 
   {
+     
+    arr_rules=( rule*)realloc(arr_rules, (rules_cnt+1)*sizeof( rule));
+  
     char *ptr = strtok(line, delim);        
     strcpy(arr_rules[rules_cnt].address, ptr);      
     ptr = strtok(NULL, delim);
