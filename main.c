@@ -489,6 +489,160 @@ int hostname_to_ip(char * hostname , char* ip)
 }
 
 /**************************************************************************
+ * usage: Resolves rule type and amount                                   *
+ **************************************************************************/
+
+void resolve_rule_type_amt( rule * record, char type[32], char amount[32] )
+{
+  int multiplier=1;
+  if (strcmp(type,"s")==0)
+  {
+    record->type=1;
+    multiplier=1;
+  }
+  else  if (strcmp(type,"m")==0)
+  {
+    record->type=1;
+    multiplier=60;
+  }
+  else  if (strcmp(type,"h")==0)
+  {
+    record->type=1;
+    multiplier=60*60;
+  }
+  else  if (strcmp(type,"kb")==0)
+  {
+    record->type=2;
+    multiplier=1024;
+  }
+  else  if (strcmp(type,"mb")==0)
+  {
+    record->type=2;
+    multiplier=1024*1024;
+  }
+  else  if (strcmp(type,"gb")==0)
+  {
+    record->type=2;
+    multiplier=1024*1024*1024;
+  }
+  else
+  {  
+    do_debug("Incorrect Rule Type '%s'\n", type);
+    my_err("Incorrect rule !\n");
+  }
+  
+  if (record->type==1)
+  {  
+    record->time=atoi(amount)*multiplier;  
+  }
+  else
+  {
+    record->amount = atoi(amount)*multiplier;     
+  }  
+
+}
+
+/**************************************************************************
+ * usage: Print rule record                                               *
+ **************************************************************************/
+
+void print_rule(rule * record)
+{
+  do_debug("address %s\n", record->address);
+  do_debug("netstart %d\n", record->netstart);
+  do_debug("netend %d\n", record->netend);
+  do_debug("type %d\n", record->type);
+  do_debug("amount %d\n", record->amount);
+  do_debug("time %d\n", record->time);
+}
+
+/**************************************************************************
+ * usage: checks if string contains any letters                           *
+ **************************************************************************/
+
+int string_contains_letters( char str[255])
+{
+  int letters_found = 0;
+  int len = strlen(str);
+  for(int i = 0; i < len; i++) 
+  {
+    if((str[i]>=96)&&(str[i]<132)) // letters
+    {
+      letters_found = 1;
+      break;
+    }
+  }  
+  return letters_found; 
+}
+/**************************************************************************
+ * usage: reads rules file to memory                                      *
+ **************************************************************************/
+int load_rules()
+{
+  FILE * frules;
+  char * line = NULL;
+  size_t len = 0;
+  ssize_t read;  
+  char delim[] = " ";
+  frules = fopen("rules", "r");
+  if (frules == NULL)
+    do_debug("can't open rules file", "");
+  
+  arr_rules = NULL;
+    
+  while ((read = getline(&line, &len, frules)) != -1) 
+  {
+    
+    arr_rules=( rule*)realloc(arr_rules, (rules_cnt+1)*sizeof( rule));
+  
+    char *ptr = strtok(line, delim);        
+    strcpy(arr_rules[rules_cnt].address, ptr);      
+    ptr = strtok(NULL, delim);
+    char amount[32]= "";
+    char type[32]= "";   
+    int i;
+
+    len = strlen(ptr+1);   
+    
+    for(i = 0; i < len; i++) 
+    {
+      if((ptr[i]>47)&&(ptr[i]<57)) // nubers
+      {
+        amount[i]=ptr[i];
+      }
+      else
+      {
+        type[i-strlen(amount)]=ptr[i];
+      }   
+    }   
+
+    resolve_rule_type_amt(&arr_rules[rules_cnt], type, amount);    
+    
+    if (string_contains_letters(arr_rules[rules_cnt].address)==1)
+    {
+      hostname_to_ip(arr_rules[rules_cnt].address,arr_rules[rules_cnt].address);
+    }
+      
+    CIDR *addr1;
+    addr1 = cidr_from_str(arr_rules[rules_cnt].address);   
+
+    uint32_t netip =0; // network ip to compare with
+    uint32_t netmask=0 ; // network ip subnet mask
+        
+    inet_pton(AF_INET, cidr_to_str(addr1, CIDR_ONLYADDR ), &netip);
+    inet_pton(AF_INET, cidr_to_str(addr1, CIDR_ONLYPFLEN | CIDR_NETMASK), &netmask);
+        
+    arr_rules[rules_cnt].netstart = (netip & netmask); // first ip in subnet
+    arr_rules[rules_cnt].netend = (arr_rules[rules_cnt].netstart | ~netmask); // last ip in subnet
+   // print_rule(&arr_rules[rules_cnt]);
+    rules_cnt++;      
+  }
+
+  fclose(frules); 
+  return rules_cnt;
+}
+
+/**************************************************************************
  * usage: Main function                                *
  **************************************************************************/
 
@@ -507,12 +661,7 @@ int main(int argc, char *argv[]) {
   u_char net1[] = {192, 168, 5, 1};
   u_char net2[] = {192, 168, 5, 2};
   progname = argv[0]; 
-  FILE * frules;
-  char * line = NULL;
-  size_t len = 0;
-  ssize_t read;  
-  char delim[] = " ";
-   
+    
   /* Check command line options */
   while((option = getopt(argc, argv, "i:hd")) > 0) {
     switch(option) {
@@ -544,115 +693,7 @@ int main(int argc, char *argv[]) {
   } 
   
   do_debug("Loading rules\n", "");
-  frules = fopen("rules", "r");
-  if (frules == NULL)
-    do_debug("can't open rules file", "");
-  
-  arr_rules = NULL;
-    
-  while ((read = getline(&line, &len, frules)) != -1) 
-  {
-     
-    arr_rules=( rule*)realloc(arr_rules, (rules_cnt+1)*sizeof( rule));
-  
-    char *ptr = strtok(line, delim);        
-    strcpy(arr_rules[rules_cnt].address, ptr);      
-    ptr = strtok(NULL, delim);
-    char amount[32];
-    char type[32];    
-        
-    len = strlen(ptr+1);
-    int i;
-    int multiplier=1;
-    for(i = 0; i < len; i++) 
-    {
-      if((ptr[i]>47)&&(ptr[i]<57)) // nubers
-      {
-        amount[i]=ptr[i];
-      }
-      else
-      {
-        type[i-strlen(amount)]=ptr[i];
-      }   
-    }   
-    if (strcmp(type,"s")==0)
-    {
-      arr_rules[rules_cnt].type=1;
-      multiplier=1;
-    }
-    else  if (strcmp(type,"m")==0)
-    {
-      arr_rules[rules_cnt].type=1;
-      multiplier=60;
-    }
-    else  if (strcmp(type,"h")==0)
-    {
-      arr_rules[rules_cnt].type=1;
-      multiplier=60*60;
-    }
-    else  if (strcmp(type,"kb")==0)
-    {
-      arr_rules[rules_cnt].type=2;
-      multiplier=1024;
-    }
-    else  if (strcmp(type,"mb")==0)
-    {
-      arr_rules[rules_cnt].type=2;
-      multiplier=1024*1024;
-    }
-    else  if (strcmp(type,"gb")==0)
-    {
-      arr_rules[rules_cnt].type=2;
-      multiplier=1024*1024*1024;
-    }
-    else
-    {
-      my_err("Incorrect rule !\n");
-    }
-     	
-    if (arr_rules[rules_cnt].type==1)
-    {  
-      arr_rules[rules_cnt].time=atoi(amount)*multiplier;  
-    }
-    else
-    {
-      arr_rules[rules_cnt].amount = atoi(amount)*multiplier;     
-    }  
-    for(i = 0; i < 32; i++)  { amount[i]=0; }
-    for(i = 0; i < 32; i++)  { type[i]=0; }
-
-
-    int letters_found = 0;
-    len = strlen(arr_rules[rules_cnt].address);
-    for(i = 0; i < len; i++) 
-    {
-      if((arr_rules[rules_cnt].address[i]>=96)&&(arr_rules[rules_cnt].address[i]<132)) // letters
-      {
-        letters_found = 1;
-        break;
-      }
-    }   
-    if (letters_found==1)
-    {
-      hostname_to_ip(arr_rules[rules_cnt].address,arr_rules[rules_cnt].address);
-    }
-      
-    CIDR *addr1;
-    addr1 = cidr_from_str(arr_rules[rules_cnt].address);   
-
-    uint32_t netip =0; // network ip to compare with
-    uint32_t netmask=0 ; // network ip subnet mask
-        
-    inet_pton(AF_INET, cidr_to_str(addr1, CIDR_ONLYADDR ), &netip);
-    inet_pton(AF_INET, cidr_to_str(addr1, CIDR_ONLYPFLEN | CIDR_NETMASK), &netmask);
-        
-    arr_rules[rules_cnt].netstart = (netip & netmask); // first ip in subnet
-    arr_rules[rules_cnt].netend = (arr_rules[rules_cnt].netstart | ~netmask); // last ip in subnet
-	
-    rules_cnt++;      
-  }
-
-  fclose(frules); 
+  load_rules();
   do_debug("%d rules loaded \n", rules_cnt);
  
   do_debug("Connecting to interface %s\n", if_name);
@@ -662,10 +703,8 @@ int main(int argc, char *argv[]) {
     my_err("Error connecting to tun/tap interface %s!\n", if_name);
     exit(1);
   }
-
   do_debug("Successfully connected to interface %s\n", if_name);
   
-
   do_debug("Starting To Read \n", "");
   while(1) {
     int ret;
