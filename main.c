@@ -5,10 +5,8 @@
 TODO:
 
 *implement quic connection recognition https://github.com/wireshark/wireshark/blob/master/epan/dissectors/packet-quic.c as currently it  limits all udp traffic
-*track conection end and cleanup connection table
-*implement port checking to allow multiple connections at the same time to  the same host
 *auto setup/ cleanup tun interface
-
+*implement proper tcp connect sequence tracing and timeouts 
 */
 
 #include <stdio.h>
@@ -35,6 +33,14 @@ TODO:
 #include <netdb.h>	
 
 #define BUFSIZE 2000   
+#define RULE_TYPE_TIME 1   
+
+#define PROTOCOL_TCP 6
+#define PROTOCOL_UDP 17
+#define PROTOCOL_ICMP 1
+
+#define DIR_REQUEST 1
+#define DIR_RESPONSE 2
 
 int debug;
 char *progname;
@@ -47,6 +53,7 @@ typedef struct
   int type;
   uint32_t amount;
   int time;	
+  int timeused;
 } rule;
 
 rule *arr_rules=NULL;
@@ -55,10 +62,13 @@ int rules_cnt = 0;
 typedef struct 
 {
   uint32_t adest;
-  int port;
-  int rule;
+  int pdest;
+  int psrc;
+  int protocol;
   uint32_t amount;
-  uint32_t starttime;
+  uint32_t startTime;
+  int finCount;/// count fin packets
+  int timeUsed;
 } conn_data;
 
 conn_data *arr_conn=NULL;  
@@ -124,8 +134,6 @@ int tun_alloc(char *dev, int flags) {
 
   return fd;
 }
-
-
 
 /**************************************************************************
  * cread: read routine that checks for errors and exits if an error is    *
@@ -216,45 +224,37 @@ void usage(void) {
   exit(1);
 }
 
-
 /**************************************************************************
  * usage: helps recalculate TCP checksum                                  *
  **************************************************************************/
-
 static uint16_t check2(struct iovec *iov, int iovcnt) {
-    long    sum;
-    uint16_t    answer;
-    struct iovec   *iovp;
+  long    sum;
+  uint16_t    answer;
+  struct iovec   *iovp;
+  sum = 0;
+  for (iovp = iov; iovp < iov + iovcnt; iovp++) {
+    uint16_t *ptr;
+    size_t len;
 
-    sum = 0;
+    ptr = iovp->iov_base;
+    len = iovp->iov_len;
 
-    for (iovp = iov; iovp < iov + iovcnt; iovp++) {
-        uint16_t *ptr;
-        size_t len;
-
-        ptr = iovp->iov_base;
-        len = iovp->iov_len;
-
-        while (len > 1) {
-            sum += *ptr++;
-            len -= 2;
-        }
-
-        if (len == 1) {
-            u_char t[2];
-            t[0] = (u_char)*ptr;
-            t[1] = 0;
-
-            sum += (uint16_t)*t;
-        }
-
+    while (len > 1) {
+      sum += *ptr++;
+      len -= 2;
     }
+    if (len == 1) {
+      u_char t[2];
+      t[0] = (u_char)*ptr;
+      t[1] = 0;
 
-    sum = (sum >> 16) + (sum & 0xFFFF);
-    sum += (sum >> 16);
-    answer = ~sum;
-    
-    return answer;
+      sum += (uint16_t)*t;
+    }
+  }
+  sum = (sum >> 16) + (sum & 0xFFFF);
+  sum += (sum >> 16);
+  answer = ~sum;    
+  return answer;
 }
 
 /**************************************************************************
@@ -320,23 +320,153 @@ static void udpcheck(struct iphdr *iph, struct udphdr *udph) {
 /**************************************************************************
  * usage: recalculates IP checksum                                       *
  **************************************************************************/
-
 static uint16_t ipcheck(uint16_t *ptr, size_t len) {
-    uint32_t    sum;
-    uint16_t    answer;
+  uint32_t    sum;
+  uint16_t    answer;
 
-    sum = 0;
+  sum = 0;
+ 
+  while (len > 1) {
+    sum += *ptr++;
+    len -= 2;
+  }
 
-    while (len > 1) {
-        sum += *ptr++;
-        len -= 2;
-    }
-
-    sum = (sum >> 16) + (sum & 0xFFFF);
-    sum += (sum >> 16);
-    answer = ~sum;
+  sum = (sum >> 16) + (sum & 0xFFFF);
+  sum += (sum >> 16);
+  answer = ~sum;
     
-    return answer;
+  return answer;
+}
+
+/**************************************************************************
+ * usage: Calculates how many bytes was used for all connections to        *
+ *         specified ip                                                   *
+ **************************************************************************/
+int GetAmountUsedForIp(int32_t conn_ip)
+{
+  int amount=0;
+  for (int j=0; j<conn_cnt;j++)
+  {		   	
+     if (arr_conn[j].adest==conn_ip)	
+     {
+      	amount=amount+arr_conn[j].amount;      	
+     }
+  }	
+  return amount;
+}
+
+/**************************************************************************
+ * usage: Calculates how many time was used for all connections to        *
+ *         specified ip                                                   *
+ **************************************************************************/
+int GetTimeUsedForIp(int32_t conn_ip)
+{
+  int time=0;
+  for (int j=0; j<conn_cnt;j++)
+  {		   	
+     if (arr_conn[j].adest==conn_ip)	
+     {
+      	time=time+arr_conn[j].timeUsed;
+      	if (arr_conn[j].finCount<2)
+      	{
+      		time=time+(getTick() - arr_conn[j].startTime);
+      	}
+     }
+  }	
+  return time;
+}
+
+/**************************************************************************
+ * usage: Updates connection status                                       *
+ **************************************************************************/
+void UpdateConn(int j,  int isSyn, int isFin, ssize_t n)
+{
+  if (isFin==1)
+  {
+    arr_conn[j].finCount++;
+    if (arr_conn[j].finCount==2)
+    {
+      arr_conn[j].timeUsed=arr_conn[j].timeUsed+(getTick() - arr_conn[j].startTime);
+      arr_conn[j].startTime=getTick(); 
+    }  
+  }
+  if ((isSyn==1)&&(arr_conn[j].finCount==2)) //new conn with same source/dest port 
+  {	    	
+    arr_conn[j].startTime=getTick(); 
+    arr_conn[j].finCount=0;
+  }
+  arr_conn[j].amount=arr_conn[j].amount+n;	
+}
+
+
+/**************************************************************************
+ * usage: Adds connection to connection list                              *
+ **************************************************************************/
+void AddConn(int32_t ip_tocheck, int pdest, int psrc, int isSyn, int isFin, int protocol , ssize_t n)
+{
+  arr_conn=(conn_data*)realloc(arr_conn, (conn_cnt+1)*sizeof(conn_data));
+  arr_conn[conn_cnt].adest=ip_tocheck;
+  arr_conn[conn_cnt].timeUsed=0;
+  arr_conn[conn_cnt].pdest=pdest;
+  arr_conn[conn_cnt].psrc=psrc;
+  arr_conn[conn_cnt].protocol=protocol;  
+  arr_conn[conn_cnt].startTime=getTick();        
+  arr_conn[conn_cnt].amount=0;
+  conn_cnt++;
+  do_debug("appended connection list \n","");
+}
+
+/**************************************************************************
+ * usage: Checks if packet needs to be dropped by any rule                *
+ **************************************************************************/
+int checkRules(int32_t ip_tocheck, int pdest, int psrc, int isSyn, int isFin, int protocol , ssize_t n)
+{
+  int DropPacket=0;
+  int conn_updated=0;    	
+  for (int i=0; i<rules_cnt;i++)
+  {
+    if (( ip_tocheck >= arr_rules[i].netstart)&& (ip_tocheck <= arr_rules[i].netend))
+    {
+      int conn_found = 0;
+      for (int j=0; j<conn_cnt;j++)
+      {		   	
+        if ((arr_conn[j].adest==ip_tocheck)&&(arr_conn[j].pdest==pdest)&&(arr_conn[j].psrc==psrc)) 
+	{
+	  conn_found=1;
+	  if (conn_updated==0)
+	  {
+	     UpdateConn( j, isSyn, isFin, n);
+	     conn_updated=1;
+	  }	
+	  	   	 	
+	  if ( arr_rules[i].type==RULE_TYPE_TIME)
+	  {  
+	    if ((GetTimeUsedForIp(ip_tocheck)) >  arr_rules[i].time*1000 )
+	    {            
+             // if (protocol == 17) /*ONLY UDP*/
+            //  {
+                DropPacket=1;  
+                do_debug("Packet will be dropped by rule # %d \n",i+1);
+            //  }              
+            }			   	      	
+          }
+          else// data amount
+          {            
+            if (GetAmountUsedForIp(ip_tocheck)>arr_rules[i].amount)
+            {
+              DropPacket=1;
+              do_debug("Packet will be dropped by rule # %d \n",i+1);
+            }
+          }
+        }
+      }
+      if (conn_found==0)//add connection  to list
+      {      
+        AddConn(ip_tocheck, pdest, psrc, isSyn, isFin, protocol, n);       
+      }	   
+    }
+  }  
+  return DropPacket;   
 }
 
 /**************************************************************************
@@ -346,117 +476,93 @@ static uint16_t ipcheck(uint16_t *ptr, size_t len) {
 static int InspectPacket(u_char* buf, ssize_t n, u_char* net1, u_char* net2) {
   struct iphdr   *iph;
   size_t      len;
-        
-  int DropPacket=0;
+  struct tcphdr  *tcph=NULL;     
+  struct udphdr  *udph=NULL; 
 
   iph = (struct iphdr*)(buf  );
   len = iph->ihl * 4;
 
+  int pdest;
+  int psrc;
+  int isSyn = 0;
+  int isFin = 0;
+  if (iph->protocol == PROTOCOL_TCP)
+  {
+    do_debug("TCP \n","");   
+    tcph = (struct tcphdr*)((u_char*)iph + len);    
+    pdest=ntohs(tcph->dest);
+    psrc=ntohs(tcph->source);    
+    isSyn=tcph->syn;
+    isFin=tcph->fin;    
+  }
+  else if (iph->protocol == PROTOCOL_UDP)
+  {
+    do_debug("UDP \n","");   
+    udph = (struct udphdr*)((u_char*)iph + len);
+    pdest=ntohs(udph->dest);
+    psrc=ntohs(udph->source);    
+  }
+  else if (iph->protocol == PROTOCOL_ICMP)
+  {
+    do_debug("ICMP \n","");
+  }
+  else  
+  {
+    do_debug("Other protocol=%d \n",iph->protocol);
+  }
+  
   /* clear crc */
   iph->check = 0;
+  
+  //print_ip(iph->daddr);
+  //print_ip(iph->saddr); 
+  //do_debug("source port  %d \n",psrc);    
+  //do_debug("dest port %d \n",pdest);
+  //do_debug("syn %d \n",isSyn);
+  //do_debug("fin %d \n",isFin); 
   
   int direction; // 1- to server; 2 from server
   /* replcace ip */
   if (memcmp(&iph->saddr, net1, 4)) 
   {
     memcpy(&iph->saddr, net2, 4);
-    direction = 1;
+    direction = DIR_REQUEST;
   }
 
   if (memcmp(&iph->daddr, net2, 4)) 
   {
     memcpy(&iph->daddr, net1, 4);
-    direction = 2;
-  }
-       
-  //print_ip(iph->daddr);
-  //print_ip(iph->saddr);
+    direction = DIR_RESPONSE;
+  }  
+        
   int32_t ip_tocheck;    	
   
-  if (direction == 1)
+  if (direction == DIR_REQUEST)
   {
-    ip_tocheck=iph->daddr;
-      	
+    ip_tocheck=iph->daddr;      	
   }
   else
   {
-    ip_tocheck=iph->saddr;
+    ip_tocheck=iph->saddr;    
+    int tmp;
+    tmp=pdest;
+    pdest=psrc;
+    psrc=tmp;
   }
 
-      	
-  for (int i=0; i<rules_cnt;i++)
-  {
-    if (( ip_tocheck >= arr_rules[i].netstart)&& (ip_tocheck <= arr_rules[i].netend))
-    {
-      int conn_found = 0;
-      for (int j=0; j<conn_cnt;j++)
-      {		   	
-        if (arr_conn[j].adest==ip_tocheck) 
-	{
-	  conn_found=1;		   	 	
-	  if ( arr_rules[i].type==1)
-	  {  
-	    if (((getTick() - arr_conn[j].starttime) >  arr_rules[i].time*1000 ))
-            {            
-              if (iph->protocol == 17) /*ONLY UDP*/
-              {
-                DropPacket=1;  
-                do_debug("Packet will be dropped by rule # %d \n",i+1);
-              }              
-            }
-			   	      	
-          }
-          else
-          {
-            arr_conn[j].amount=arr_conn[j].amount+n;
-            if (arr_conn[j].amount>arr_rules[i].amount)
-            {
-              DropPacket=1;
-              do_debug("Packet will be dropped by rule # %d \n",i+1);
-            }
-          }
-        }
-      }
-      if (conn_found==0)//add connection  to list
-      {
-      
-        arr_conn=(conn_data*)realloc(arr_conn, (conn_cnt+1)*sizeof(conn_data));
-        arr_conn[conn_cnt].adest=ip_tocheck;
-        if ( arr_rules[i].type==1)
-        {
-          arr_conn[conn_cnt].starttime=getTick();
-        }
-        else
-        {
-          arr_conn[conn_cnt].amount=0;
-        }
-        conn_cnt++;
-        do_debug("appended connection list \n",i);
-      }	   
-    }
-  }     
+  int DropPacket=checkRules( ip_tocheck, pdest, psrc, isSyn, isFin, iph->protocol, n);
 
-  
   /* put new crc */
   iph->check = ipcheck((uint16_t*)iph, len);
          
-  if (iph->protocol == 6) 
+  if (iph->protocol == PROTOCOL_TCP) 
   {
-    do_debug("TCP \n","");
-    struct tcphdr  *tcph;
-    tcph = (struct tcphdr*)((u_char*)iph + len);
-    tcpcheck(iph, tcph, n - ((u_char*)tcph - buf) - tcph->doff * 4);
-  }          
-     
-  if (iph->protocol == 17)
+    tcpcheck(iph, tcph, n - ((u_char*)tcph - buf) - tcph->doff * 4);    
+  }  
+  else if (iph->protocol == PROTOCOL_UDP)
   {
-    do_debug("UDP \n","");
-    struct udphdr  *udph;
-    udph = (struct udphdr*)((u_char*)iph + len);
     udpcheck(iph, udph);
-  }
-	
-  //do_debug("Value %d \n",iph->protocol);
+  }  	
 
   return DropPacket;
 }
